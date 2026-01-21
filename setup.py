@@ -59,7 +59,6 @@ else:
     cxx_args = ["-O3", "-std=c++20", "-DNDEBUG", "-Wno-deprecated-declarations"]
 
 ext_modules = []
-
 ext_modules.append(
     CUDAExtension(
         name="flash_mla.cuda",
@@ -105,7 +104,7 @@ ext_modules.append(
             "csrc/sm100/prefill/sparse/fwd_for_small_topk/head128/instantiations/phase1_decode_k512.cu",
         ],
         extra_compile_args={
-            "cxx": cxx_args + get_features_args() + ["-DNO_PYBIND11=1"],
+            "cxx": cxx_args + get_features_args(),
             "nvcc": [
                 "-O3",
                 "-std=c++20",
@@ -134,42 +133,6 @@ ext_modules.append(
     )
 )
 
-ext_modules.append(
-    CUDAExtension(
-        name="flash_mla.dense_fp8",
-        sources=[
-            "csrc/sm90/decode/dense_fp8/pybind.cpp",
-            "csrc/sm90/decode/dense_fp8/flash_fwd_mla_fp8_sm90.cu",
-        ],
-        extra_compile_args={
-            "cxx": cxx_args + get_features_args() + ["-DNO_PYBIND11=1"],
-            "nvcc": [
-                "-O3",
-                "-std=c++17",
-                "-DNDEBUG",
-                "-D_USE_MATH_DEFINES",
-                "-Wno-deprecated-declarations",
-                "-U__CUDA_NO_HALF_OPERATORS__",
-                "-U__CUDA_NO_HALF_CONVERSIONS__",
-                "-U__CUDA_NO_HALF2_OPERATORS__",
-                "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                "--expt-relaxed-constexpr",
-                "--expt-extended-lambda",
-                "--use_fast_math",
-                "--ptxas-options=-v,--register-usage-level=10",
-                "-DNO_PYBIND11=1"
-            ] + get_features_args() + get_arch_flags() + get_nvcc_thread_args(),
-        },
-        include_dirs=[
-            Path(this_dir) / "csrc",
-            Path(this_dir) / "csrc" / "sm90",
-            Path(this_dir) / "csrc" / "sm90" / "decode" / "dense_fp8",
-            Path(this_dir) / "csrc" / "cutlass" / "include",
-            Path(this_dir) / "csrc" / "cutlass" / "tools" / "util" / "include",
-        ],
-    )
-)
-
 try:
     cmd = ['git', 'rev-parse', '--short', 'HEAD']
     rev = '+' + subprocess.check_output(cmd).decode('ascii').rstrip()
@@ -186,4 +149,3 @@ setup(
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
 )
-
