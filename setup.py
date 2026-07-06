@@ -49,7 +49,18 @@ def get_nvcc_thread_args():
     nvcc_threads = os.getenv("NVCC_THREADS") or "32"
     return ["--threads", nvcc_threads]
 
-subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"])
+# NOTE: the cutlass submodule is NOT fetched here (no git commands at build
+# time). Populate it manually before building:
+#   git submodule update --init csrc/cutlass
+_cutlass_marker = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "csrc", "cutlass", "include", "cutlass", "cutlass.h",
+)
+if not os.path.isfile(_cutlass_marker):
+    raise RuntimeError(
+        "csrc/cutlass is not populated. Run: "
+        "git submodule update --init csrc/cutlass"
+    )
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -140,13 +151,10 @@ ext_modules.append(
     )
 )
 
-try:
-    cmd = ['git', 'rev-parse', '--short', 'HEAD']
-    rev = '+' + subprocess.check_output(cmd).decode('ascii').rstrip()
-except Exception as _:
-    now = datetime.now()
-    date_time_str = now.strftime("%Y-%m-%d-%H-%M-%S")
-    rev = '+' + date_time_str
+# No git commands at build time: version is stamped with the build timestamp
+# instead of `git rev-parse --short HEAD`.
+now = datetime.now()
+rev = '+' + now.strftime("%Y-%m-%d-%H-%M-%S")
 
 
 setup(

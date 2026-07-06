@@ -3,6 +3,10 @@
 # Stage-1 standalone verification for the SM90 TP small-head decode kernels
 # (sparse_fp8_swapsab_tp2/tp4/tp8) grafted onto vllm-project/FlashMLA.
 #
+# PREREQUISITE (run manually before this script; it contains no git commands):
+#   the csrc/cutlass submodule must already be populated, e.g.:
+#     git submodule update --init csrc/cutlass
+#
 # Run this ON THE H200 BOX from the repo root:
 #
 #   bash tests/build_and_test_tp_decode.sh            # build + all tests
@@ -25,8 +29,11 @@ cd "${ROOT_DIR}"
 STEP="${1:-all}"
 
 build() {
-    echo "==> git submodule update --init csrc/cutlass"
-    git submodule update --init csrc/cutlass
+    if [ ! -f "csrc/cutlass/include/cutlass/cutlass.h" ]; then
+        echo "ERROR: csrc/cutlass is not populated."
+        echo "Run:   git submodule update --init csrc/cutlass"
+        exit 1
+    fi
 
     echo "==> building flash_mla (SM90 only)"
     FLASH_MLA_DISABLE_SM100=1 python -m pip install --no-build-isolation -v -e .
