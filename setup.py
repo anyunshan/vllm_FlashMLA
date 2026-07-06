@@ -80,6 +80,13 @@ ext_modules.append(
             "csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h64.cu",
             "csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h128.cu",
 
+            # sm90 sparse decode, TP small-head swap-AB variants (V32, s_q=1):
+            # h_q=32 (TP=2) / h_q=16 (TP=4) / h_q=8 (TP=8). P^T = K @ Q^T fills
+            # the wgmma M=64 atom along the token axis instead of padding heads.
+            "csrc/sm90/decode/sparse_fp8_swapsab_tp2/instantiations/v32_h32.cu",
+            "csrc/sm90/decode/sparse_fp8_swapsab_tp4/instantiations/v32_h16.cu",
+            "csrc/sm90/decode/sparse_fp8_swapsab_tp8/instantiations/v32_h8.cu",
+
             # sm90 sparse prefill
             "csrc/sm90/prefill/sparse/fwd.cu",
             "csrc/sm90/prefill/sparse/instantiations/phase1_k512.cu",

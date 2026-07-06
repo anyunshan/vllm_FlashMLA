@@ -5,6 +5,9 @@
 #include "params.h"
 
 #include "sm90/decode/sparse_fp8/splitkv_mla.h"
+#include "sm90/decode/sparse_fp8_swapsab_tp2/splitkv_mla.h"
+#include "sm90/decode/sparse_fp8_swapsab_tp4/splitkv_mla.h"
+#include "sm90/decode/sparse_fp8_swapsab_tp8/splitkv_mla.h"
 #include "sm100/decode/head64/kernel.h"
 #include "sm100/prefill/sparse/fwd_for_small_topk/head128/phase1.h"
 #include "smxx/decode/get_decoding_sched_meta/get_decoding_sched_meta.h"
@@ -58,8 +61,11 @@ class Decode_Sm90_Impl : public DecodeImplBase {
 public:
     DecodeImplMeta get_meta(int h_q, int s_q) override {
         Arch arch = Arch();
+        // h_q < 64 (TP small-head swap-AB kernels) still launches a single
+        // M block per SM part, so clamp the divisor to 1.
+        int num_m_blocks = (h_q > 64) ? (h_q / 64) : 1;
         return {
-            std::max(arch.num_sms / s_q / (h_q/64), 1),
+            std::max(arch.num_sms / s_q / num_m_blocks, 1),
             5,
             64
         };
@@ -67,6 +73,28 @@ public:
 
 protected:
     void run_(const SparseAttnDecodeParams &params, const std::vector<FeatureT> &required_features) override {
+        // TP small-head paths (GLM-5 style V32 MQA decode under tensor
+        // parallelism): h_q = 32/16/8 map to swap-AB kernels (P^T = K @ Q^T)
+        // that fill the wgmma M=64 atom along the token axis instead of
+        // padding heads to 64. V32 only, s_q == 1 only (callers with s_q > 1,
+        // e.g. MTP, must pad heads to 64 and use the sparse_fp8 path).
+        if (params.h_q == 32 || params.h_q == 16 || params.h_q == 8) {
+            TORCH_CHECK(params.model_type == ModelType::V32,
+                        "SM90 h_q=", params.h_q,
+                        " sparse decode supports only V32 (d_qk=576)");
+            TORCH_CHECK(params.s_q == 1,
+                        "SM90 h_q=", params.h_q,
+                        " sparse decode supports only s_q=1; pad heads to 64 "
+                        "for s_q>1 (e.g. MTP)");
+            if (params.h_q == 32) {
+                sm90::decode::sparse_fp8_swapsab_tp2::run_flash_splitkv_mla_fp8_swapsab_tp2_kernel<ModelType::V32, 32>(params);
+            } else if (params.h_q == 16) {
+                sm90::decode::sparse_fp8_swapsab_tp4::run_flash_splitkv_mla_fp8_swapsab_tp4_kernel<ModelType::V32, 16>(params);
+            } else {
+                sm90::decode::sparse_fp8_swapsab_tp8::run_flash_splitkv_mla_fp8_swapsab_tp8_kernel<ModelType::V32, 8>(params);
+            }
+            return;
+        }
         DISPATCH_MODEL_TYPE(params.model_type, MODEL_TYPE, [&]() {
             DISPATCH_NUM_HEADS(params.h_q, NUM_HEADS, [&]() {
                 sm90::decode::sparse_fp8::run_flash_splitkv_mla_fp8_sparse_kernel<MODEL_TYPE, NUM_HEADS>(params);
@@ -335,7 +363,11 @@ sparse_attn_decode_interface(
     }
 
     std::vector<DecodeFeatures> features;
-    if (h_q == 64) {
+    if (h_q == 64 || h_q == 32 || h_q == 16 || h_q == 8) {
+        // h_q=32 (TP=2) -> sparse_fp8_swapsab_tp2
+        // h_q=16 (TP=4) -> sparse_fp8_swapsab_tp4
+        // h_q=8  (TP=8) -> sparse_fp8_swapsab_tp8
+        // All use BLOCK_M=64 wgmma atoms internally; reuse the HEAD_64 feature.
         features.push_back(DecodeFeatures::HEAD_64);
     } else if (h_q == 128) {
         features.push_back(DecodeFeatures::HEAD_128);
