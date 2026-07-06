@@ -64,6 +64,18 @@ if not os.path.isfile(_cutlass_marker):
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
+# CUDA 13 moved the CCCL (libcudacxx) headers from $CUDA_HOME/include/ into
+# $CUDA_HOME/include/cccl/. nvcc resolves <cuda/std/...> implicitly, but the
+# host compiler (g++, used for plain .cpp sources like csrc/api/api.cpp, whose
+# cutlass includes need <cuda/std/utility>) does not — add the directory
+# explicitly when present. No-op on CUDA 12, where the headers still live
+# directly under include/.
+extra_include_dirs = []
+if CUDA_HOME is not None:
+    _cccl_dir = os.path.join(CUDA_HOME, "include", "cccl")
+    if os.path.isdir(_cccl_dir):
+        extra_include_dirs.append(Path(_cccl_dir))
+
 if IS_WINDOWS:
     cxx_args = ["/O2", "/std:c++20", "/DNDEBUG", "/W0"]
 else:
@@ -147,7 +159,7 @@ ext_modules.append(
             Path(this_dir) / "csrc" / "sm90",
             Path(this_dir) / "csrc" / "cutlass" / "include",
             Path(this_dir) / "csrc" / "cutlass" / "tools" / "util" / "include",
-        ],
+        ] + extra_include_dirs,
     )
 )
 
