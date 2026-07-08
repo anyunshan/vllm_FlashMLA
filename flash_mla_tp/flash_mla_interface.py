@@ -3,7 +3,7 @@ import dataclasses
 
 import torch
 
-import flash_mla.cuda as flash_mla_cuda
+import flash_mla_tp.cuda as flash_mla_cuda
 
 @dataclasses.dataclass
 class FlashMLASchedMeta:

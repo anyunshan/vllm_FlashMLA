@@ -7,7 +7,7 @@ from typing import Tuple
 import torch
 
 import kernelkit as kk
-import flash_mla
+import flash_mla_tp as flash_mla
 
 @dataclasses.dataclass
 class TestParam:

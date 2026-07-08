@@ -9,7 +9,7 @@ import rich.table
 import torch
 import kernelkit as kk
 
-import flash_mla
+import flash_mla_tp as flash_mla
 
 import lib
 from lib import TestParam

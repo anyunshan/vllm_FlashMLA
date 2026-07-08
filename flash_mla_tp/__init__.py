@@ -4,7 +4,7 @@ __version__ = "1.0.0"
 # imported here: it lives in the _flashmla_extension_C module built only by
 # vLLM's CMake (csrc/extension/), which the standalone setup.py build does
 # not compile. The vendored-into-vLLM path never imports this __init__.py.
-from flash_mla.flash_mla_interface import (
+from flash_mla_tp.flash_mla_interface import (
     get_mla_metadata,
     flash_mla_with_kvcache,
     flash_attn_varlen_func,

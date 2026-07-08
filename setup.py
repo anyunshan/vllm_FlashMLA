@@ -84,7 +84,7 @@ else:
 ext_modules = []
 ext_modules.append(
     CUDAExtension(
-        name="flash_mla.cuda",
+        name="flash_mla_tp.cuda",
         sources=[
             # API
             "csrc/api/api.cpp",
@@ -170,9 +170,9 @@ rev = '+' + now.strftime("%Y-%m-%d-%H-%M-%S")
 
 
 setup(
-    name="flash_mla",
+    name="flash_mla_tp",
     version="1.0.0" + rev,
-    packages=find_packages(include=['flash_mla']),
+    packages=find_packages(include=['flash_mla_tp']),
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
 )

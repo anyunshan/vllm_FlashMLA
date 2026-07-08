@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 
 # pip install flashinfer-python
-from flash_mla import flash_mla_with_kvcache, get_mla_metadata
+from flash_mla_tp import flash_mla_with_kvcache, get_mla_metadata
 
 
 def scaled_dot_product_attention(query, key, value, h_q, h_kv, is_causal=False):

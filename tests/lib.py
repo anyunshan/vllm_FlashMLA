@@ -6,7 +6,7 @@ import random
 
 import torch
 import kernelkit as kk
-import flash_mla
+import flash_mla_tp as flash_mla
 
 import quant
 

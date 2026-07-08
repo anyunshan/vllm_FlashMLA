@@ -4,7 +4,7 @@ import torch
 from torch.utils.checkpoint import checkpoint
 import triton
 
-from flash_mla import flash_attn_varlen_func
+from flash_mla_tp import flash_attn_varlen_func
 from kernelkit import check_is_allclose
 
 def get_window_size(causal, window):
