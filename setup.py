@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-from datetime import datetime
 import subprocess
 
 from setuptools import setup, find_packages
@@ -163,10 +162,10 @@ ext_modules.append(
     )
 )
 
-# No git commands at build time: version is stamped with the build timestamp
-# instead of `git rev-parse --short HEAD`.
-now = datetime.now()
-rev = '+' + now.strftime("%Y-%m-%d-%H-%M-%S")
+# Fixed local-version tag (no git, no timestamp). A timestamp here breaks
+# `pip install .`: setup.py runs twice (metadata + wheel) a few seconds apart,
+# producing mismatched version strings that pip rejects as an invalid wheel.
+rev = "+tp"
 
 
 setup(
