@@ -1,43 +1,59 @@
-// Note: Avoid <torch/extension.h> as it pulls in pybind11 internals that
-// use _PyThreadState_UncheckedGet, which is not in the stable ABI and was
-// removed in Python 3.13.
-#include <torch/torch.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+// FlashMLA dense FP8 kernel interface, migrated to the PyTorch stable ABI
+// Despite the file name it no longer uses pybind11.
+#include <cmath>
+#include <cstdint>
+#include <optional>
+#include <vector>
+
+#include <cuda_runtime.h>
+
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/csrc/stable/accelerator.h>
+
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/Exception.h>
+
 #include <cutlass/fast_math.h>
 #include <cutlass/numeric_types.h>
 
+#include <kerutils/supplemental/cuda_stream.h>
+#include <kerutils/supplemental/device_prop.h>
+
 #include "flash_mla.h"
 
-#define CHECK_DEVICE(x) TORCH_CHECK(x.is_cuda(), #x " must be on CUDA")
-#define CHECK_SHAPE(x, ...) TORCH_CHECK(x.sizes() == torch::IntArrayRef({__VA_ARGS__}), #x " must have shape (" #__VA_ARGS__ ")")
-#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
+using torch::stable::Tensor;
+using torch::headeronly::ScalarType;
 
-std::vector<at::Tensor>
+#define CHECK_DEVICE(x) STD_TORCH_CHECK(x.is_cuda(), #x " must be on CUDA")
+#define CHECK_SHAPE(x, ...) STD_TORCH_CHECK(x.sizes().equals({__VA_ARGS__}), #x " must have shape (" #__VA_ARGS__ ")")
+#define CHECK_CONTIGUOUS(x) STD_TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
+
+std::vector<Tensor>
 fwd_kvcache_mla_fp8(
-    at::Tensor &q,                               // batch_size x seqlen_q x num_heads x head_size
-    const at::Tensor &kcache,                    // num_blocks x num_heads_k x (page_block_size*656) (when is_fp8 is True)
-    const int head_size_v,
-    const at::Tensor &seqlens_k,                 // batch_size
-    const at::Tensor &block_table,               // batch_size x max_num_blocks_per_seq
-    const float softmax_scale,
+    Tensor q,                                    // batch_size x seqlen_q x num_heads x head_size
+    const Tensor &kcache,                        // num_blocks x num_heads_k x (page_block_size*656) (when is_fp8 is True)
+    const int64_t head_size_v,
+    const Tensor &seqlens_k,                     // batch_size
+    const Tensor &block_table,                   // batch_size x max_num_blocks_per_seq
+    const double softmax_scale,
     bool is_causal,
-    const at::Tensor &tile_scheduler_metadata,   // num_sm_parts x TileSchedulerMetaDataSize
-    const at::Tensor &num_splits,                // batch_size + 1
-    const std::optional<at::Tensor> &descale_q,  // None or batch_size
-    const std::optional<at::Tensor> &descale_k   // None or batch_size
+    const Tensor &tile_scheduler_metadata,       // num_sm_parts x TileSchedulerMetaDataSize
+    const Tensor &num_splits,                    // batch_size + 1
+    const std::optional<Tensor> &descale_q,      // None or batch_size
+    const std::optional<Tensor> &descale_k       // None or batch_size
 ) {
     // Check the architecture
-    auto dprops = at::cuda::getCurrentDeviceProperties();
-    TORCH_CHECK(dprops->major == 9 && dprops->minor == 0, "Dense FP8 MLA is only supported on SM90");
+    const cudaDeviceProp &dprops = kerutils::get_cached_device_prop();
+    STD_TORCH_CHECK(dprops.major == 9 && dprops.minor == 0, "Dense FP8 MLA is only supported on SM90");
 
     // Check data types
-    TORCH_CHECK(q.dtype() == torch::kFloat8_e4m3fn);
-    TORCH_CHECK(kcache.dtype() == q.dtype(), "query and key must have the same dtype");
-    TORCH_CHECK(seqlens_k.dtype() == torch::kInt32, "seqlens_k must have dtype int32");
-    TORCH_CHECK(block_table.dtype() == torch::kInt32, "block_table must have dtype torch.int32");
-    TORCH_CHECK(tile_scheduler_metadata.dtype() == torch::kInt32, "tile_scheduler_metadata must have dtype int32");
-    TORCH_CHECK(num_splits.dtype() == torch::kInt32, "num_splits must have dtype int32");
+    STD_TORCH_CHECK(q.scalar_type() == ScalarType::Float8_e4m3fn);
+    STD_TORCH_CHECK(kcache.scalar_type() == q.scalar_type(), "query and key must have the same dtype");
+    STD_TORCH_CHECK(seqlens_k.scalar_type() == ScalarType::Int, "seqlens_k must have dtype int32");
+    STD_TORCH_CHECK(block_table.scalar_type() == ScalarType::Int, "block_table must have dtype torch.int32");
+    STD_TORCH_CHECK(tile_scheduler_metadata.scalar_type() == ScalarType::Int, "tile_scheduler_metadata must have dtype int32");
+    STD_TORCH_CHECK(num_splits.scalar_type() == ScalarType::Int, "num_splits must have dtype int32");
 
     // Check device
     CHECK_DEVICE(q);
@@ -50,38 +66,37 @@ fwd_kvcache_mla_fp8(
     if (descale_k.has_value()) CHECK_DEVICE(descale_k.value());
 
     // Check layout
-    TORCH_CHECK(q.stride(-1) == 1, "q must have contiguous last dimension");
-    TORCH_CHECK(kcache.stride(-1) == 1, "kcache must have contiguous last dimension");
+    STD_TORCH_CHECK(q.stride(-1) == 1, "q must have contiguous last dimension");
+    STD_TORCH_CHECK(kcache.stride(-1) == 1, "kcache must have contiguous last dimension");
     CHECK_CONTIGUOUS(seqlens_k);
-    TORCH_CHECK(block_table.stride(-1) == 1, "block_table must have contiguous last dimension");
+    STD_TORCH_CHECK(block_table.stride(-1) == 1, "block_table must have contiguous last dimension");
     CHECK_CONTIGUOUS(tile_scheduler_metadata);
     CHECK_CONTIGUOUS(num_splits);
 
-    const auto sizes = q.sizes();
-    const int batch_size = sizes[0];
-    const int seqlen_q_ori = sizes[1];
-    const int num_heads_q = sizes[2];
-    const int head_size_k = sizes[3];
-    TORCH_CHECK(head_size_k == 576, "Only head_size_k == 576 is supported");
-    TORCH_CHECK(head_size_v == 512, "Only head_size_v == 512 is supported");
+    const int batch_size = q.size(0);
+    const int seqlen_q_ori = q.size(1);
+    const int num_heads_q = q.size(2);
+    const int head_size_k = q.size(3);
+    STD_TORCH_CHECK(head_size_k == 576, "Only head_size_k == 576 is supported");
+    STD_TORCH_CHECK(head_size_v == 512, "Only head_size_v == 512 is supported");
 
     const int max_num_blocks_per_seq = block_table.size(1);
     const int num_blocks = kcache.size(0);
     const int page_block_size = kcache.size(1);
     const int num_heads_k = kcache.size(2);
-    TORCH_CHECK(page_block_size == 64, "Currently page_block_size must be 64");
-    TORCH_CHECK(batch_size > 0, "batch size must be positive");
-    TORCH_CHECK(num_heads_q % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
+    STD_TORCH_CHECK(page_block_size == 64, "Currently page_block_size must be 64");
+    STD_TORCH_CHECK(batch_size > 0, "batch size must be positive");
+    STD_TORCH_CHECK(num_heads_q % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
 
-    TORCH_CHECK(descale_q.has_value() && descale_k.has_value(), "descale is required when input dtype is fp8");
+    STD_TORCH_CHECK(descale_q.has_value() && descale_k.has_value(), "descale is required when input dtype is fp8");
     auto descale_q_ = descale_q.value();
     auto descale_k_ = descale_k.value();
     CHECK_DEVICE(descale_q_);
     CHECK_DEVICE(descale_k_);
-    TORCH_CHECK(descale_q_.stride(-1) == 1);
-    TORCH_CHECK(descale_k_.stride(-1) == 1);
-    TORCH_CHECK(descale_q_.dtype() == torch::kFloat);
-    TORCH_CHECK(descale_k_.dtype() == torch::kFloat);
+    STD_TORCH_CHECK(descale_q_.stride(-1) == 1);
+    STD_TORCH_CHECK(descale_k_.stride(-1) == 1);
+    STD_TORCH_CHECK(descale_q_.scalar_type() == ScalarType::Float);
+    STD_TORCH_CHECK(descale_k_.scalar_type() == ScalarType::Float);
     CHECK_SHAPE(descale_q_, 1);
     CHECK_SHAPE(descale_k_, 1);
 
@@ -90,23 +105,23 @@ fwd_kvcache_mla_fp8(
     const int num_q_heads_per_hk = num_heads_q / num_heads_k;
     const int q_seq_per_hk = seqlen_q_ori * num_q_heads_per_hk;
     const int num_heads = num_heads_k;
-    q = q.view({batch_size, seqlen_q_ori, num_heads_k, num_q_heads_per_hk, head_size_k}).transpose(2, 3)
-            .reshape({batch_size, q_seq_per_hk, num_heads, head_size_k});
+    q = torch::stable::reshape(
+            torch::stable::transpose(
+                torch::stable::view(q, {batch_size, seqlen_q_ori, num_heads_k, num_q_heads_per_hk, head_size_k}),
+                2, 3),
+            {batch_size, q_seq_per_hk, num_heads, head_size_k});
 
     CHECK_SHAPE(q, batch_size, q_seq_per_hk, num_heads, head_size_k);
     CHECK_SHAPE(kcache, num_blocks, page_block_size, num_heads_k, head_size_k);
     CHECK_SHAPE(seqlens_k, batch_size);
     CHECK_SHAPE(block_table, batch_size, max_num_blocks_per_seq);
-    TORCH_CHECK(tile_scheduler_metadata.size(1) == TileSchedulerMetaDataSize);
+    STD_TORCH_CHECK(tile_scheduler_metadata.size(1) == TileSchedulerMetaDataSize);
     CHECK_SHAPE(num_splits, batch_size+1);
 
-    at::cuda::CUDAGuard device_guard{(char)q.get_device()};
+    torch::stable::accelerator::DeviceGuard device_guard(q.get_device_index());
 
-    auto opts = q.options();
-    caffe2::TypeMeta out_type;
-    out_type = torch::kBFloat16;
-    at::Tensor out = torch::empty({batch_size, q_seq_per_hk, num_heads, head_size_v}, opts.dtype(out_type));
-    at::Tensor softmax_lse = torch::empty({batch_size, num_heads, q_seq_per_hk}, opts.dtype(at::kFloat));
+    Tensor out = torch::stable::new_empty(q, {batch_size, q_seq_per_hk, num_heads, head_size_v}, ScalarType::BFloat16);
+    Tensor softmax_lse = torch::stable::new_empty(q, {batch_size, num_heads, q_seq_per_hk}, ScalarType::Float);
     CHECK_CONTIGUOUS(softmax_lse);
 
     // Set up parameters for the dense FP8 kernel
@@ -115,7 +130,7 @@ fwd_kvcache_mla_fp8(
     params.b = batch_size;
     params.s_q = seqlen_q_ori;
     params.q_seq_per_hk = q_seq_per_hk;
-    params.seqlens_k_ptr = seqlens_k.data_ptr<int>();
+    params.seqlens_k_ptr = const_cast<int*>(seqlens_k.const_data_ptr<int>());
     params.h_q = num_heads_q;
     params.h_k = num_heads_k;
     params.num_blocks = num_blocks;
@@ -152,67 +167,72 @@ fwd_kvcache_mla_fp8(
     params.indices_batch_stride = 0;
     params.indices_row_stride = 0;
 
-    params.block_table = block_table.data_ptr<int>();
+    params.block_table = const_cast<int*>(block_table.const_data_ptr<int>());
     params.block_table_batch_stride = block_table.stride(0);
     params.page_block_size = page_block_size;
 
-    params.tile_scheduler_metadata_ptr = tile_scheduler_metadata.data_ptr<int>();
+    params.tile_scheduler_metadata_ptr = const_cast<int*>(tile_scheduler_metadata.const_data_ptr<int>());
     params.num_sm_parts = tile_scheduler_metadata.size(0);
-    params.num_splits_ptr = num_splits.data_ptr<int>();
+    params.num_splits_ptr = const_cast<int*>(num_splits.const_data_ptr<int>());
 
     // Set up accumulation tensors
     const int total_num_splits = batch_size + params.num_sm_parts;
-    at::Tensor softmax_lse_accum = torch::empty({total_num_splits, num_heads, q_seq_per_hk}, opts.dtype(at::kFloat));
-    at::Tensor out_accum = torch::empty({total_num_splits, num_heads, q_seq_per_hk, head_size_v}, opts.dtype(at::kFloat));
+    Tensor softmax_lse_accum = torch::stable::new_empty(q, {total_num_splits, num_heads, q_seq_per_hk}, ScalarType::Float);
+    Tensor out_accum = torch::stable::new_empty(q, {total_num_splits, num_heads, q_seq_per_hk, head_size_v}, ScalarType::Float);
     CHECK_CONTIGUOUS(softmax_lse_accum);
     CHECK_CONTIGUOUS(out_accum);
     params.total_num_splits = total_num_splits;
     params.softmax_lseaccum_ptr = softmax_lse_accum.data_ptr();
     params.oaccum_ptr = out_accum.data_ptr();
 
-    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    auto stream = kerutils::get_current_cuda_stream(q);
 
     // Call the actual kernel implementation
 #ifdef FLASH_MLA_DISABLE_FP8
-    TORCH_CHECK(false, "FlashMLA is compiled with -DFLASH_MLA_DISABLE_FP8. Please remove this flag from your environment and re-compile FlashMLA.");
+    STD_TORCH_CHECK(false, "FlashMLA is compiled with -DFLASH_MLA_DISABLE_FP8. Please remove this flag from your environment and re-compile FlashMLA.");
 #else
     run_mha_fwd_splitkv_mla<cutlass::float_e4m3_t, cutlass::bfloat16_t, 576>(params, stream);
 #endif
 
     // Reshape outputs back to original format
-    out = out.view({batch_size, seqlen_q_ori, num_q_heads_per_hk, num_heads_k, head_size_v}).transpose(2, 3)
-            .reshape({batch_size, seqlen_q_ori, num_heads_q, head_size_v});
-    softmax_lse = softmax_lse.view({batch_size, num_heads_k, seqlen_q_ori, num_q_heads_per_hk}).transpose(2, 3)
-            .reshape({batch_size, num_heads_q, seqlen_q_ori});
+    out = torch::stable::reshape(
+            torch::stable::transpose(
+                torch::stable::view(out, {batch_size, seqlen_q_ori, num_q_heads_per_hk, num_heads_k, head_size_v}),
+                2, 3),
+            {batch_size, seqlen_q_ori, num_heads_q, head_size_v});
+    softmax_lse = torch::stable::reshape(
+            torch::stable::transpose(
+                torch::stable::view(softmax_lse, {batch_size, num_heads_k, seqlen_q_ori, num_q_heads_per_hk}),
+                2, 3),
+            {batch_size, num_heads_q, seqlen_q_ori});
 
     return {out, softmax_lse};
 }
 
-std::vector<at::Tensor>
+std::vector<Tensor>
 get_mla_decoding_metadata_dense_fp8(
-    at::Tensor &seqlens_k,
-    const int num_heads_per_head_k,
-    const int num_heads_k
+    const Tensor &seqlens_k,
+    const int64_t num_heads_per_head_k,
+    const int64_t num_heads_k
 ) {
     // This should match the logic in the MLA kernel.
     static constexpr int block_size_m = 64;
     static constexpr int block_size_n = 64;
     static constexpr int fixed_overhead_num_blocks = 5;
     CHECK_DEVICE(seqlens_k);
-    TORCH_CHECK(seqlens_k.is_contiguous());
-    TORCH_CHECK(seqlens_k.dtype() == torch::kInt32);
+    STD_TORCH_CHECK(seqlens_k.is_contiguous());
+    STD_TORCH_CHECK(seqlens_k.scalar_type() == ScalarType::Int);
     int batch_size = seqlens_k.size(0);
-    int *seqlens_k_ptr = seqlens_k.data_ptr<int>();
-    auto options = seqlens_k.options();
-    auto dprops = at::cuda::getCurrentDeviceProperties();
-    int sm_count = dprops->multiProcessorCount;
-    int num_sm_parts = std::max(sm_count / num_heads_k / cutlass::ceil_div(num_heads_per_head_k, block_size_m), 1);
-    auto tile_scheduler_metadata = torch::empty({num_sm_parts, TileSchedulerMetaDataSize}, options);
-    auto num_splits = torch::empty({batch_size + 1}, options);
-    int *tile_scheduler_metadata_ptr = tile_scheduler_metadata.data_ptr<int>();
-    int *num_splits_ptr = num_splits.data_ptr<int>();
-    at::cuda::CUDAGuard device_guard{(char)seqlens_k.get_device()};
-    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    int *seqlens_k_ptr = const_cast<int*>(seqlens_k.const_data_ptr<int>());
+    const cudaDeviceProp &dprops = kerutils::get_cached_device_prop();
+    int sm_count = dprops.multiProcessorCount;
+    int num_sm_parts = std::max(sm_count / (int)num_heads_k / cutlass::ceil_div((int)num_heads_per_head_k, block_size_m), 1);
+    Tensor tile_scheduler_metadata = torch::stable::new_empty(seqlens_k, {num_sm_parts, TileSchedulerMetaDataSize}, ScalarType::Int);
+    Tensor num_splits = torch::stable::new_empty(seqlens_k, {batch_size + 1}, ScalarType::Int);
+    int *tile_scheduler_metadata_ptr = tile_scheduler_metadata.mutable_data_ptr<int>();
+    int *num_splits_ptr = num_splits.mutable_data_ptr<int>();
+    torch::stable::accelerator::DeviceGuard device_guard(seqlens_k.get_device_index());
+    auto stream = kerutils::get_current_cuda_stream(seqlens_k);
     Mla_metadata_params params = {};
     params.seqlens_k_ptr = seqlens_k_ptr;
     params.tile_scheduler_metadata_ptr = tile_scheduler_metadata_ptr;
@@ -224,13 +244,3 @@ get_mla_decoding_metadata_dense_fp8(
     get_mla_metadata_func(params, stream);
     return {tile_scheduler_metadata, num_splits};
 }
-
-#if defined(NO_PYBIND11) && NO_PYBIND11 == 1
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.doc() = "FlashMLA Dense FP8 kernels";
-    m.def("fwd_kvcache_mla_fp8", &fwd_kvcache_mla_fp8,
-          "Forward pass for MLA with FP8 dense attention");
-    m.def("get_mla_decoding_metadata_dense_fp8", &get_mla_decoding_metadata_dense_fp8,
-          "Get decoding metadata for MLA with FP8 dense attention");
-}
-#endif

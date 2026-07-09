@@ -17,36 +17,18 @@
 
 #include <kerutils/supplemental/torch_tensors.h>
 #include <kerutils/supplemental/cuda_stream.h>
+#include <kerutils/supplemental/device_prop.h>
 
 #include <cutlass/bfloat16.h>
 
 using torch::stable::Tensor;
 using torch::headeronly::ScalarType;
 
-// Re-exported from kerutils so existing call sites can use it unqualified.
+// Re-exported from kerutils so existing call sites can use them unqualified.
 using kerutils::get_current_cuda_stream;
+using kerutils::get_cached_device_prop;
 
 static constexpr float LOG_2_E = 1.44269504f;
-
-// Helper to access device properties (SM count, compute capability) via the CUDA
-// Runtime directly and cache per device index.
-inline const cudaDeviceProp &get_cached_device_prop() {
-    int device_idx = static_cast<int>(torch::stable::accelerator::getCurrentDeviceIndex());
-    constexpr int kMaxDevices = 16;
-    static cudaDeviceProp props[kMaxDevices];
-    static bool inited[kMaxDevices] = {false};
-    if (device_idx < 0 || device_idx >= kMaxDevices) {
-        // Uncached fallback for unexpectedly large device indices.
-        static thread_local cudaDeviceProp tmp;
-        cudaGetDeviceProperties(&tmp, device_idx);
-        return tmp;
-    }
-    if (!inited[device_idx]) {
-        cudaGetDeviceProperties(&props[device_idx], device_idx);
-        inited[device_idx] = true;
-    }
-    return props[device_idx];
-}
 
 // A struct that holds the architecture information of the current GPU.
 struct Arch {
