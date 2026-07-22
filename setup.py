@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-from datetime import datetime
 import subprocess
 
 from setuptools import setup, find_packages
@@ -59,9 +58,25 @@ def get_nvcc_thread_args():
     nvcc_threads = os.getenv("NVCC_THREADS") or "32"
     return ["--threads", nvcc_threads]
 
-subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"])
-
 this_dir = os.path.dirname(os.path.abspath(__file__))
+
+# No git invocations at build time (build scripts must stay git-free): require
+# the cutlass submodule to be present instead of initializing it here.
+assert os.path.exists(os.path.join(this_dir, "csrc", "cutlass", "include")), (
+    "csrc/cutlass is missing. Run `git submodule update --init csrc/cutlass` "
+    "once before building."
+)
+
+def get_extra_include_dirs():
+    # CUDA 13 moved CCCL/libcudacxx headers to $CUDA_HOME/include/cccl; g++
+    # compiling host sources (csrc/api/api.cpp) fails on <cuda/std/...>
+    # without it. No-op on CUDA 12.
+    extra_dirs = []
+    if CUDA_HOME is not None:
+        cccl_dir = os.path.join(CUDA_HOME, "include", "cccl")
+        if os.path.isdir(cccl_dir):
+            extra_dirs.append(Path(cccl_dir))
+    return extra_dirs
 
 if IS_WINDOWS:
     cxx_args = ["/O2", "/std:c++20", "/DNDEBUG", "/W0"]
@@ -71,7 +86,7 @@ else:
 ext_modules = []
 ext_modules.append(
     CUDAExtension(
-        name="flash_mla._flashmla_C",
+        name="flash_mla._flashmla_C_novita",
         sources=[
             # API
             "csrc/api/api.cpp",
@@ -89,6 +104,9 @@ ext_modules.append(
             "csrc/sm90/decode/sparse_fp8/instantiations/model1_persistent_h128.cu",
             "csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h64.cu",
             "csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h128.cu",
+
+            # sm90 native FP8 x swap-AB TP=2 (h_q=32) sparse decode
+            "csrc/sm90/decode/sparse_native_fp8_swapsab_tp2/instantiations/v32_h32.cu",
 
             # sm90 sparse prefill
             "csrc/sm90/prefill/sparse/fwd.cu",
@@ -139,25 +157,18 @@ ext_modules.append(
             Path(this_dir) / "csrc" / "sm90",
             Path(this_dir) / "csrc" / "cutlass" / "include",
             Path(this_dir) / "csrc" / "cutlass" / "tools" / "util" / "include",
-        ],
+        ] + get_extra_include_dirs(),
         # Build against CPython's Limited API (abi3) so one wheel works across
         # multiple CPython versions, which is possible now that pybind11 is gone
         py_limited_api=True,
     )
 )
 
-try:
-    cmd = ['git', 'rev-parse', '--short', 'HEAD']
-    rev = '+' + subprocess.check_output(cmd).decode('ascii').rstrip()
-except Exception as _:
-    now = datetime.now()
-    date_time_str = now.strftime("%Y-%m-%d-%H-%M-%S")
-    rev = '+' + date_time_str
-
-
 setup(
     name="flash_mla",
-    version="1.0.0" + rev,
+    # Fixed version (no git/datetime): non-editable installs run setup.py
+    # twice and mismatched dynamic versions make pip reject the wheel.
+    version="1.0.0+nfp8tp2",
     packages=find_packages(include=['flash_mla']),
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
