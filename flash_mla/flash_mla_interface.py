@@ -3,10 +3,10 @@ import dataclasses
 
 import torch
 
-# torch.ops._flashmla_C is the op namespace registered by the compiled extension
-# (loaded in __init__.py). Alias it to the old module name so the call sites below
-# are unchanged.
-flash_mla_cuda = torch.ops._flashmla_C
+# torch.ops._flashmla_C_novita is the op namespace registered by the compiled
+# extension (loaded in __init__.py). Alias it to the old module name so the
+# call sites below are unchanged.
+flash_mla_cuda = torch.ops._flashmla_C_novita
 
 @dataclasses.dataclass
 class FlashMLASchedMeta:
@@ -440,4 +440,35 @@ def flash_attn_varlen_kvpacked_func(
         q, kv[:, :, :head_dim_qk], kv[:, :, head_dim_qk:],
         cu_seqlens_qo, cu_seqlens_kv, max_seqlen_qo, max_seqlen_kv,
         causal, softmax_scale, is_varlen,
+    )
+
+
+def sparse_native_fp8_swapsab_tp2_decode_fwd(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    sm_scale: float,
+    tile_scheduler_metadata: torch.Tensor,
+    num_splits: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Native-FP8 swap-AB TP2 sparse decode (SM90, h_q=32, s_q=1).
+
+    Arguments:
+        q: (b, 1, 32, 576), torch.float8_e4m3fn, last dim contiguous.
+        kv: (num_blocks, page_block_size, 1, 576), fp8/uint8/int8 view of the
+            576-bytes-per-token all-fp8 layout (512B NoPE + 64B RoPE, no
+            scales).
+        indices: (b, 1, topk), torch.int32 absolute token indices, -1 invalid,
+            topk % 64 == 0.
+        sm_scale: softmax scale (1/sqrt(576)).
+        tile_scheduler_metadata / num_splits: pass empty int32 tensors on the
+            first call to trigger generation; reuse the returned pair across
+            same-shape calls.
+
+    Return:
+        (out (b, 1, 32, 512) bfloat16, lse (b, 1, 32) float32,
+         tile_scheduler_metadata, num_splits)
+    """
+    return flash_mla_cuda.sparse_native_fp8_swapsab_tp2_decode_fwd(
+        q, kv, indices, sm_scale, tile_scheduler_metadata, num_splits
     )
